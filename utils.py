@@ -48,65 +48,49 @@ def print_now(return_flag=0):
     else:
         pass
 
-# Sentence Generator (Decoder) for GPT-3 ...
-def decoder_for_gpt3(args, input, max_length):
-    
-    # GPT-3 API allows each users execute the API within 60 times in a minute ...
-    # time.sleep(1)
-    time.sleep(args.api_time_interval)
-    
-    # https://beta.openai.com/account/api-keys
-    # openai.api_key = "[Your OpenAI API Key]"
+def decoder_for_gpt3(args, input):
     
     # Specify engine ...
-    # Instruct GPT3
-    if args.model == "gpt3":
-        engine = "text-ada-001"
-    elif args.model == "gpt3-medium":
-        engine = "text-babbage-001"
-    elif args.model == "gpt3-large":
-        engine = "text-curie-001"
-    elif args.model == "gpt3-xl":
-        engine = "text-davinci-002"
-    elif args.model == "text-davinci-001":
-        engine = "text-davinci-001"
-    elif args.model == "code-davinci-002":
-        engine = "code-davinci-002"
+    if args.model == "gpt3.5":
+        engine = "gpt-3.5-turbo"
+    elif args.model == "gpt4":
+        engine = "gpt-4"
     else:
         raise ValueError("model is not properly defined ...")
-        
-    if ("few_shot" in args.method or "auto" in args.method)  and engine == "code-davinci-002":
-        response = openai.Completion.create(
-          engine=engine,
-          prompt=input,
-          max_tokens=max_length,
-          temperature=args.temperature,
-          top_p=1,
-          frequency_penalty=0,
-          presence_penalty=0,
-          stop=["\n"]
-        )
-    else:
-        response = openai.Completion.create(
-            engine=engine,
-            prompt=input,
-            max_tokens=max_length,
-            temperature=args.temperature,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0,
-            stop=None
-        )
 
-    return response["choices"][0]["text"]
+    # Backoff algorithm for handling service unavailability
+    for delay_secs in (2**x for x in range(0, 10)):
+        try:
+            response = openai.ChatCompletion.create(
+                model=engine, 
+                messages=input,
+                temperature=args.temperature,
+                top_p=1,
+                frequency_penalty=0,
+                presence_penalty=0,
+                stop=None,
+                request_timeout=300
+            )
+            return response["choices"][0]["message"]["content"]
+
+        except Exception as e:
+            randomness_collision_avoidance = random.randint(0, 1000) / 1000.0
+            sleep_dur = delay_secs + randomness_collision_avoidance
+            print(f"Error: {e}. Retrying in {round(sleep_dur, 2)} seconds.")
+            time.sleep(sleep_dur)
+            continue
+
+    raise Exception("Maximum retries reached. API is still unavailable.")
+
+
 
 class Decoder():
     def __init__(self):
         # print_now()
         pass
  
-    def decode(self, args, input, max_length):
-        response = decoder_for_gpt3(args, input, max_length)
+    def decode(self, args, input):
+        response = decoder_for_gpt3(args, input)
         return response
 
 def data_reader(args):
@@ -115,7 +99,7 @@ def data_reader(args):
     answers = []
     decoder = json.JSONDecoder()
 
-    if args.dataset == "aqua":
+    if args.dataset in ["aqua"]:
       with open(args.dataset_path) as f:
         lines = f.readlines()
         for line in lines:
@@ -126,15 +110,15 @@ def data_reader(args):
           questions.append(json_res["question"].strip() + " " + choice)
           answers.append(json_res["correct"])
   
-    elif args.dataset == "gsm8k":
+    elif args.dataset in ["gsm8k", "gsm8k-hard"]:
       with open(args.dataset_path) as f:
         lines = f.readlines()
         for line in lines:
           json_res = decoder.raw_decode(line)[0]
           questions.append(json_res["question"].strip())
-          answers.append(json_res["answer"].split("#### ")[-1])
-  
-    elif args.dataset == "commonsensqa":
+          answers.append(json_res["answer"].split("#### ")[-1].replace(',', ''))
+
+    elif args.dataset in ["commonsensqa"]:
       with open(args.dataset_path) as f:
         lines = f.readlines()
         for line in lines:
@@ -148,18 +132,7 @@ def data_reader(args):
           questions.append(json_res["question"]["stem"].strip() + " " + choice)
           answers.append(json_res["answerKey"])
 
-    elif args.dataset in ("addsub", "multiarith", "singleeq"):
-      with open(args.dataset_path) as f:
-        json_data = json.load(f)
-        for line in json_data:
-          q = line["sQuestion"].strip()
-          a = str(line["lSolutions"][0])
-          if a[-2:] == ".0":
-              a = a[:-2]
-          questions.append(q)
-          answers.append(a)
-        
-    elif args.dataset == "strategyqa":
+    elif args.dataset in ["strategyqa"]:
       with open(args.dataset_path) as f:
         json_data = json.load(f)["examples"]
         for line in json_data:
@@ -171,62 +144,17 @@ def data_reader(args):
               a = "no"
           questions.append(q)
           answers.append(a)
-        
-    elif args.dataset == "svamp":
+
+    elif args.dataset == "bbh-cj":
       with open(args.dataset_path) as f:
-        json_data = json.load(f)
-        for line in json_data:
-            q = line["Body"].strip() + " " + line["Question"].strip()
-            a = str(line["Answer"])
-            if a[-2:] == ".0":
-                a = a[:-2]
-            questions.append(q)
-            answers.append(a)
-            
-    elif args.dataset in ("bigbench_date", "object_tracking"):
-      with open(args.dataset_path) as f:
-        json_data = json.load(f)
-        json_data = json_data["examples"]
-        if args.dataset == "bigbench_date":
-            choice_index = ['A','B','C','D','E','F']
-        elif args.dataset in ("object_tracking"):
-            choice_index = ['A','B','C']
-        else:
-            raise ValueError("dataset is not properly defined ...")
+        json_data = json.load(f)["examples"]
         for line in json_data:
           q = line["input"].strip()
-          if args.dataset == "bigbench_date":
-              choice = "Answer Choices:"
-              # Randomly shuffle the answer choice dictionary because the original answer is always A ...
-              choice_dic = shuffleDict(line["target_scores"])
-          elif args.dataset == "object_tracking":
-              choice = "\nWhich choice is true ? Answer Choices:"
-              choice_dic = line["target_scores"]
-          else:
-              raise ValueError("dataset is not properly defined ...")
-          for i, key_value in enumerate(choice_dic.items()):
-              key, value = key_value
-              choice += " ("
-              choice += choice_index[i]
-              choice += ") "
-              choice += key
-              if value == 1:
-                  a = choice_index[i]
-                  #a = key
-          q = q + " " + choice
-          questions.append(q)
-          answers.append(a)            
-          
-    elif args.dataset in ("coin_flip", "last_letters"):
-      with open(args.dataset_path) as f:
-        json_data = json.load(f)
-        json_data = json_data["examples"]
-        for line in json_data:
-          q = line["question"]
-          a = line["answer"]
+          q = re.sub(r'\nOptions:\n- Yes\n- No$', '', q)
+          a = line["target"]
           questions.append(q)
           answers.append(a)
-        
+
     else:
         raise ValueError("dataset is not properly defined ...")
     
@@ -276,7 +204,7 @@ def setup_data_loader(args):
     dataset = MyDataset(args)
     
     dataloader = torch.utils.data.DataLoader(dataset,
-                  shuffle=True,
+                  shuffle=False,
                   batch_size=args.minibatch_size,
                   drop_last=False,
                   num_workers=dataloader_num_workers,
@@ -288,34 +216,30 @@ def setup_data_loader(args):
 
 # ver 0.2
 def answer_cleansing(args, pred, must_choice=False):
-
-    print("pred_before : " + pred)
     
-    if args.method in ("few_shot", "few_shot_cot", "auto_cot"):
-        preds = pred.split(args.direct_answer_trigger_for_fewshot)
-        answer_flag = True if len(preds) > 1 else False 
-        pred = preds[-1]
+    # if args.method in ("kantv1", "kantv2"):
+    #     preds = pred.split(args.direct_answer_trigger)
+    #     print("After split:", preds)
+    #     pred = preds[-1]
+    print("pred_before : " + pred)
 
     if args.dataset in ("aqua", "commonsensqa"):
         pred = re.findall(r'A|B|C|D|E', pred)
-    elif args.dataset == "bigbench_date":
-        pred = re.findall(r'A|B|C|D|E|F', pred)
-    elif args.dataset in ("object_tracking"):
-        pred = re.findall(r'A|B|C', pred)
-    elif args.dataset in ("gsm8k", "addsub", "multiarith", "svamp", "singleeq"):
+    elif args.dataset in ("gsm8k","gsm8k-hard"):
         if must_choice:
             pred = re.findall(r'A|B|C|D', pred)
         else:
             pred = pred.replace(",", "")
             pred = [s for s in re.findall(r'-?\d+\.?\d*', pred)]
-    elif args.dataset in ("strategyqa", "coin_flip"):
+    elif args.dataset in ("strategyqa"):
         pred = pred.lower()
         pred = re.sub("\"|\'|\n|\.|\s|\:|\,"," ", pred)
         pred = pred.split(" ")
         pred = [i for i in pred if i in ("yes", "no")]
-    elif args.dataset == "last_letters":
-        pred = re.sub("\"|\'|\n|\.|\s","", pred)
-        pred = [pred]
+    elif args.dataset in ("bbh-cj"):
+        pred = re.sub("\"|\'|\n|\.|\s|\:|\,"," ", pred)
+        pred = pred.split(" ")
+        pred = [i for i in pred if i in ("Yes", "No")]
     else:
         raise ValueError("dataset is not properly defined ...")
 
@@ -323,14 +247,7 @@ def answer_cleansing(args, pred, must_choice=False):
     if len(pred) == 0:
         pred = ""
     else:
-        if args.method in ("few_shot", "few_shot_cot", "auto_cot"):
-            if answer_flag:
-                # choose the first element in list ...
-                pred = pred[0]
-            else:
-                # choose the last element in list ...
-                pred = pred[-1]
-        elif args.method in ("zero_shot", "zero_shot_cot"):
+        if args.method in ("zero_shot", "zero_shot_cot", "kantv1", "kantv2"):
             # choose the first element in list ...
             pred = pred[0]
         else:
@@ -343,65 +260,4 @@ def answer_cleansing(args, pred, must_choice=False):
     
     print("pred_after : " + pred)
     
-    return pred
-
-def create_demo_text(args, cot_flag):
-    x, z, y = [], [], []
-    
-    with open(args.demo_path, encoding="utf-8") as f:
-        json_data = json.load(f)
-        json_data = json_data["demo"]
-        for line in json_data:
-            x.append(line["question"])
-            z.append(line["rationale"])
-            y.append(line["pred_ans"])
-
-    index_list = list(range(len(x)))
-    
-    demo_text = ""
-    for i in index_list:
-        if cot_flag:
-            demo_text += x[i] + " " + z[i] + " " + \
-                         args.direct_answer_trigger_for_fewshot + " " + y[i] + ".\n\n"
-        else:
-            demo_text += x[i] + " " + args.direct_answer_trigger_for_fewshot + " " + y[i] + ".\n\n"
-    return demo_text
-
-def answer_cleansing_zero_shot(args, pred, must_choice=False):
-    pred = pred.strip()
-    if args.dataset in ("aqua", "commonsensqa"):
-        pred = re.findall(r'A|B|C|D|E', pred)
-    elif args.dataset == "bigbench_date":
-        pred = re.findall(r'A|B|C|D|E|F', pred)
-    elif args.dataset in ("object_tracking"):
-        pred = re.findall(r'A|B|C', pred)
-    elif args.dataset in ("gsm8k", "addsub", "multiarith", "svamp", "singleeq"):
-        if must_choice:
-            pred = re.findall(r'A|B|C|D', pred)
-        else:
-            pred = pred.replace(",", "")
-            pred = [s for s in re.findall(r'-?\d+\.?\d*', pred)]
-    elif args.dataset in ("strategyqa", "coin_flip"):
-        pred = pred.lower()
-        pred = re.sub("\"|\'|\n|\.|\s|\:|\,", " ", pred)
-        pred = pred.split(" ")
-        pred = [i for i in pred if i in ("yes", "no")]
-    elif args.dataset == "last_letters":
-        pred = re.sub("\"|\'|\n|\.|\s", "", pred)
-        pred = [pred]
-    else:
-        raise ValueError("dataset is not properly defined ...")
-
-    # If there is no candidate in list, null is set.
-    if len(pred) == 0:
-        pred = ""
-    else:
-        # choose the first element in list ...
-        pred = pred[0]
-
-    # (For arithmetic tasks) if a word ends with period, it will be omitted ...
-    if pred != "":
-        if pred[-1] == ".":
-            pred = pred[:-1]
-
     return pred
